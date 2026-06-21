@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import { formatFactor, formatInputKind, toNumber } from "@/lib/calc";
 import { invokeRentalApi } from "@/lib/rental-api";
@@ -20,11 +20,17 @@ function createDraftLender(): Lender {
   };
 }
 
-export function LendersWorkspace() {
-  const [variables, setVariables] = useState<RentalVariable[]>([]);
-  const [lenders, setLenders] = useState<Lender[]>([]);
+type LendersWorkspaceProps = {
+  initialData: BootstrapPayload;
+};
+
+export function LendersWorkspace({ initialData }: LendersWorkspaceProps) {
+  const [variables, setVariables] = useState<RentalVariable[]>(initialData.variables);
+  const [lenders, setLenders] = useState<Lender[]>(
+    initialData.lenders.length > 0 ? initialData.lenders : [createDraftLender()]
+  );
   const [focusedLenderIndex, setFocusedLenderIndex] = useState(0);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -43,41 +49,6 @@ export function LendersWorkspace() {
       setIsLoading(false);
     }
   };
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const initialize = async () => {
-      try {
-        const data = await invokeRentalApi<BootstrapPayload>("bootstrap");
-
-        if (cancelled) {
-          return;
-        }
-
-        const nextLenders = data.lenders.length > 0 ? data.lenders : [createDraftLender()];
-        setVariables(data.variables);
-        setLenders(nextLenders);
-        setFocusedLenderIndex(0);
-      } catch (error) {
-        if (!cancelled) {
-          setMessage(
-            error instanceof Error ? error.message : "Unable to load lender data."
-          );
-        }
-      } finally {
-        if (!cancelled) {
-          setIsLoading(false);
-        }
-      }
-    };
-
-    void initialize();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   const focusedLender = lenders[focusedLenderIndex] ?? null;
 

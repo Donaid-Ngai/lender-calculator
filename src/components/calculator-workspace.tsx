@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 import {
   aggregatePropertyValues,
@@ -17,15 +17,25 @@ import type {
   ClientScenario,
 } from "@/lib/types";
 
-export function CalculatorWorkspace() {
-  const [data, setData] = useState<BootstrapPayload | null>(null);
-  const [focusedLenderId, setFocusedLenderId] = useState<string>("");
-  const [selectedLenderIds, setSelectedLenderIds] = useState<string[]>([]);
+type CalculatorWorkspaceProps = {
+  initialData: BootstrapPayload;
+};
+
+export function CalculatorWorkspace({ initialData }: CalculatorWorkspaceProps) {
+  const [data, setData] = useState<BootstrapPayload | null>(initialData);
+  const [focusedLenderId, setFocusedLenderId] = useState<string>(
+    initialData.lenders[0]?.id ?? ""
+  );
+  const [selectedLenderIds, setSelectedLenderIds] = useState<string[]>(
+    initialData.lenders.map((lender) => lender.id).filter(Boolean) as string[]
+  );
   const [checkAllLenders, setCheckAllLenders] = useState(true);
   const [clientName, setClientName] = useState("");
   const [baseLoanAmount, setBaseLoanAmount] = useState(0);
-  const [properties, setProperties] = useState<ClientProperty[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const [properties, setProperties] = useState<ClientProperty[]>(
+    initialData.variables.length > 0 ? [createEmptyProperty(initialData.variables, 1)] : []
+  );
+  const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -41,41 +51,6 @@ export function CalculatorWorkspace() {
       setIsLoading(false);
     }
   };
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const initialize = async () => {
-      try {
-        const nextData = await invokeRentalApi<BootstrapPayload>("bootstrap");
-
-        if (cancelled) {
-          return;
-        }
-
-        setData(nextData);
-        setFocusedLenderId(nextData.lenders[0]?.id ?? "");
-        setSelectedLenderIds(nextData.lenders.map((lender) => lender.id).filter(Boolean) as string[]);
-        setProperties([createEmptyProperty(nextData.variables, 1)]);
-      } catch (error) {
-        if (!cancelled) {
-          setMessage(
-            error instanceof Error ? error.message : "Unable to load calculator data."
-          );
-        }
-      } finally {
-        if (!cancelled) {
-          setIsLoading(false);
-        }
-      }
-    };
-
-    void initialize();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   const aggregatedValues = useMemo(() => {
     if (!data) {
