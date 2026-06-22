@@ -1,10 +1,88 @@
 import type {
-  CalculationMode,
   ClientProperty,
+  ClientProfile,
   Lender,
-  LenderRule,
+  LenderFormulaKey,
+  ProvinceCode,
   RentalVariable,
 } from "@/lib/types";
+
+export const FORMULA_SEQUENCE: LenderFormulaKey[] = [
+  "vacancy_rate",
+  "economic_rent",
+  "maintenance",
+  "vacancy_amount",
+  "surplus_shortfall",
+  "dcr",
+];
+
+export const FORMULA_LABELS: Record<LenderFormulaKey, string> = {
+  vacancy_rate: "Vacancy rate %",
+  economic_rent: "Economic rent",
+  maintenance: "Maintenance",
+  vacancy_amount: "Vacancy $",
+  surplus_shortfall: "Surplus / shortfall",
+  dcr: "DCR",
+};
+
+export const DEFAULT_FORMULAS: Record<LenderFormulaKey, string> = {
+  vacancy_rate: "provincial_vacancy_rate",
+  economic_rent: "economic_rent_amount",
+  maintenance: "gross_monthly_rent * 0.15",
+  vacancy_amount: "gross_monthly_rent * vacancy_rate",
+  surplus_shortfall:
+    "gross_monthly_rent + other_monthly_rent - monthly_mortgage_payment - monthly_property_taxes - monthly_condo_fees - other_expenses - maintenance - vacancy_amount",
+  dcr:
+    "(gross_monthly_rent + other_monthly_rent - monthly_property_taxes - monthly_condo_fees - other_expenses - maintenance - vacancy_amount) / monthly_mortgage_payment",
+};
+
+export const DEFAULT_ACTIVE_FORMULA_KEYS: LenderFormulaKey[] = ["surplus_shortfall"];
+
+const ALLOWED_FORMULA_PATTERN = /^[\d\s()+\-*/._a-zA-Z]+$/;
+const IDENTIFIER_PATTERN = /[a-zA-Z_][a-zA-Z0-9_]*/g;
+
+export const PROVINCES: Array<{ code: ProvinceCode; label: string }> = [
+  { code: "AB", label: "Alberta" },
+  { code: "BC", label: "British Columbia" },
+  { code: "MB", label: "Manitoba" },
+  { code: "NB", label: "New Brunswick" },
+  { code: "NL", label: "Newfoundland and Labrador" },
+  { code: "NS", label: "Nova Scotia" },
+  { code: "NT", label: "Northwest Territories" },
+  { code: "NU", label: "Nunavut" },
+  { code: "ON", label: "Ontario" },
+  { code: "PE", label: "Prince Edward Island" },
+  { code: "QC", label: "Quebec" },
+  { code: "SK", label: "Saskatchewan" },
+  { code: "YT", label: "Yukon" },
+];
+
+export const HOUSING_UNIT_TYPE_OPTIONS: Array<{
+  value: ClientProfile["housingUnitType"];
+  label: string;
+}> = [];
+
+const FORMULA_RESULT_PLACEHOLDERS: Array<{
+  key: LenderFormulaKey | "provincial_vacancy_rate" | "dwelling_type_percentage";
+  label: string;
+}> = [
+  { key: "provincial_vacancy_rate", label: "Provincial vacancy rate" },
+  { key: "dwelling_type_percentage", label: "Dwelling type percentage" },
+  { key: "vacancy_rate", label: "Vacancy rate result" },
+  { key: "economic_rent", label: "Economic rent result" },
+  { key: "maintenance", label: "Maintenance result" },
+  { key: "vacancy_amount", label: "Vacancy dollar result" },
+  { key: "surplus_shortfall", label: "Surplus/shortfall result" },
+  { key: "dcr", label: "DCR result" },
+];
+
+export const DEFAULT_CLIENT_PROFILE: ClientProfile = {
+  addressLine1: "",
+  city: "",
+  province: "ON",
+  postalCode: "",
+  housingUnitType: "single_family",
+};
 
 function createLocalId(prefix: string): string {
   if (
@@ -18,105 +96,183 @@ function createLocalId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+function getAllowedFormulaIdentifiers(
+  variables: RentalVariable[]
+): Set<string> {
+  return new Set([
+    ...variables.map((variable) => variable.key),
+    ...FORMULA_SEQUENCE,
+    "provincial_vacancy_rate",
+    "dwelling_type_percentage",
+  ]);
+}
+
+export function validateFormula(
+  formula: string,
+  variables: RentalVariable[]
+): string | null {
+  const normalized = formula.trim();
+
+  if (!normalized) {
+    return "Formula is required.";
+  }
+
+  if (!ALLOWED_FORMULA_PATTERN.test(normalized)) {
+    return "Use only numbers, variable names, spaces, parentheses, and + - * /.";
+  }
+
+  const allowedIdentifiers = getAllowedFormulaIdentifiers(variables);
+  const identifiers = extractFormulaIdentifiers(normalized);
+
+  for (const identifier of identifiers) {
+    if (!allowedIdentifiers.has(identifier)) {
+      return `Unknown formula field: ${identifier}.`;
+    }
+  }
+
+  return null;
+}
+
+export function extractFormulaIdentifiers(formula: string): string[] {
+  return Array.from(new Set(formula.match(IDENTIFIER_PATTERN) ?? []));
+}
+
+type FormulaContext = Record<string, number>;
+
+export function buildFormulaPlaceholders(
+  variables: RentalVariable[]
+): Array<{ key: string; label: string }> {
+  return [
+    ...variables.map((variable) => ({
+      key: variable.key,
+      label: variable.label,
+    })),
+    ...FORMULA_RESULT_PLACEHOLDERS,
+  ];
+}
+
+function evaluateFormula(formula: string, context: FormulaContext): number {
+  if (!formula.trim()) {
+    throw new Error("Formula is required.");
+  }
+
+  if (!ALLOWED_FORMULA_PATTERN.test(formula.trim())) {
+    throw new Error(
+      "Use only numbers, variable names, spaces, parentheses, and + - * /."
+    );
+  }
+
+  const identifiers = extractFormulaIdentifiers(formula);
+
+  for (const identifier of identifiers) {
+    if (!(identifier in context)) {
+      throw new Error(`Unknown formula field: ${identifier}.`);
+    }
+  }
+
+  const evaluator = new Function(
+    ...identifiers,
+    `"use strict"; return (${formula});`
+  ) as (...values: number[]) => number;
+  const values = identifiers.map((identifier) => context[identifier as keyof FormulaContext] ?? 0);
+  const result = evaluator(...values);
+
+  return Number.isFinite(result) ? result : 0;
+}
+
+export type FormulaMetricResult = {
+  key: LenderFormulaKey;
+  label: string;
+  formula: string;
+  value: number;
+  error?: string;
+};
+
+export type LenderCalculationResult = {
+  summaryValue: number;
+  metrics: Record<LenderFormulaKey, number>;
+  breakdown: FormulaMetricResult[];
+  errors: string[];
+};
+
+export function isFormulaRelevant(
+  lender: Lender,
+  formulaKey: LenderFormulaKey
+): boolean {
+  return (
+    formulaKey === "surplus_shortfall" ||
+    (lender.activeFormulaKeys ?? DEFAULT_ACTIVE_FORMULA_KEYS).includes(formulaKey)
+  );
+}
+
 type CalculationInput = {
   lender: Lender;
-  variables: RentalVariable[];
+  clientProfile: ClientProfile;
   variableValues: Record<string, number>;
-  baseLoanAmount: number;
 };
 
-type Contribution = {
-  variableKey: string;
-  label: string;
-  amount: number;
-  explanation: string;
-};
-
-type CalculationResult = {
-  finalLoanAmount: number;
-  totalVariableImpact: number;
-  contributions: Contribution[];
-};
-
-function resolveUnsignedImpact(
-  rule: LenderRule,
-  variableValues: Record<string, number>
-): number {
-  const currentValue = variableValues[rule.variableKey] ?? 0;
-
-  switch (rule.calculationMode) {
-    case "ignore":
-      return 0;
-    case "value":
-      return currentValue;
-    case "value_times_factor":
-      return currentValue * rule.factor;
-    case "percent_of_reference": {
-      const referenceValue = variableValues[rule.referenceVariableKey ?? ""] ?? 0;
-      return currentValue * referenceValue * rule.factor;
-    }
-    default:
-      return 0;
-  }
-}
-
-function buildExplanation(rule: LenderRule, variableLabel: string): string {
-  switch (rule.calculationMode) {
-    case "ignore":
-      return `${variableLabel} is ignored for this lender.`;
-    case "value":
-      return `${rule.impactDirection === "increase" ? "Adds" : "Subtracts"} the full entered value.`;
-    case "value_times_factor":
-      return `${rule.impactDirection === "increase" ? "Adds" : "Subtracts"} the value multiplied by ${rule.factor}.`;
-    case "percent_of_reference":
-      return `${rule.impactDirection === "increase" ? "Adds" : "Subtracts"} ${rule.factor} x entered rate x the referenced variable.`;
-    default:
-      return "";
-  }
-}
-
-export function calculateLoanResult({
+export function calculateLenderResult({
   lender,
-  variables,
+  clientProfile,
   variableValues,
-  baseLoanAmount,
-}: CalculationInput): CalculationResult {
-  const contributions = variables.map((variable) => {
-    const rule =
-      lender.rules.find((item) => item.variableKey === variable.key) ??
-      ({
-        variableKey: variable.key,
-        impactDirection: "increase",
-        calculationMode: "ignore",
-        factor: 1,
-        referenceVariableKey: variable.defaultReferenceKey,
-        notes: "",
-      } satisfies LenderRule);
+}: CalculationInput): LenderCalculationResult {
+  const provincialVacancyRate =
+    lender.provinceVacancyRates?.[clientProfile.province] ?? 0;
+  const context = {
+    ...variableValues,
+    provincial_vacancy_rate: provincialVacancyRate,
+    dwelling_type_percentage:
+      lender.dwellingTypePercentages?.[clientProfile.housingUnitType] ?? 0,
+    vacancy_rate: 0,
+    economic_rent: 0,
+    maintenance: 0,
+    vacancy_amount: 0,
+    surplus_shortfall: 0,
+    dcr: 0,
+  } as FormulaContext;
+  const breakdown: FormulaMetricResult[] = [];
+  const errors: string[] = [];
 
-    const unsignedImpact = resolveUnsignedImpact(rule, variableValues);
-    const amount =
-      rule.impactDirection === "increase" ? unsignedImpact : -unsignedImpact;
+  for (const formulaKey of FORMULA_SEQUENCE) {
+    const shouldEvaluate = isFormulaRelevant(lender, formulaKey);
+    const formula = lender.formulas[formulaKey];
+    let value = 0;
+    let error: string | undefined;
 
-    return {
-      variableKey: variable.key,
-      label: variable.label,
-      amount,
-      explanation: buildExplanation(rule, variable.label),
-    };
-  });
+    if (shouldEvaluate) {
+      try {
+        value = evaluateFormula(formula, context);
+      } catch (caughtError) {
+        error =
+          caughtError instanceof Error
+            ? caughtError.message
+            : "Unable to evaluate formula.";
+        errors.push(`${FORMULA_LABELS[formulaKey]}: ${error}`);
+      }
+    }
 
-  const totalVariableImpact = contributions.reduce(
-    (sum, contribution) => sum + contribution.amount,
-    0
-  );
+    context[formulaKey] = value;
+    breakdown.push({
+      key: formulaKey,
+      label: FORMULA_LABELS[formulaKey],
+      formula: shouldEvaluate ? formula : "",
+      value,
+      error,
+    });
+  }
 
   return {
-    finalLoanAmount: Math.max(
-      0,
-      baseLoanAmount + lender.baseAdjustment + totalVariableImpact
-    ),
-    totalVariableImpact,
-    contributions,
+    summaryValue: context.surplus_shortfall ?? 0,
+    metrics: {
+      vacancy_rate: context.vacancy_rate ?? 0,
+      economic_rent: context.economic_rent ?? 0,
+      maintenance: context.maintenance ?? 0,
+      vacancy_amount: context.vacancy_amount ?? 0,
+      surplus_shortfall: context.surplus_shortfall ?? 0,
+      dcr: context.dcr ?? 0,
+    },
+    breakdown,
+    errors,
   };
 }
 
@@ -170,22 +326,45 @@ export function formatInputKind(inputKind: RentalVariable["inputKind"]): string 
     return "Percent";
   }
 
+  if (inputKind === "boolean") {
+    return "Yes / No";
+  }
+
   return "Number";
 }
 
-export function formatFactor(
-  factor: number,
-  calculationMode: CalculationMode
+export function formatVariableDisplay(
+  variable: RentalVariable,
+  value: number
 ): string {
-  if (calculationMode === "ignore") {
-    return "No effect";
+  if (variable.inputKind === "currency") {
+    return formatCurrency(value);
   }
 
-  if (calculationMode === "percent_of_reference") {
-    return `Reference multiplier: ${factor}`;
+  if (variable.inputKind === "percent") {
+    return formatPercentDisplay(value);
   }
 
-  return `Factor: ${factor}`;
+  if (variable.inputKind === "boolean") {
+    return value ? "Yes" : "No";
+  }
+
+  return value.toLocaleString("en-CA");
+}
+
+export function formatFormulaResult(
+  key: LenderFormulaKey,
+  value: number
+): string {
+  if (key === "vacancy_rate") {
+    return formatPercentDisplay(value);
+  }
+
+  if (key === "dcr") {
+    return value.toFixed(2);
+  }
+
+  return formatCurrency(value);
 }
 
 export function toNumber(rawValue: string): number {

@@ -2,21 +2,54 @@
 
 import { useMemo, useState } from "react";
 import { AppShell } from "@/components/app-shell";
-import { formatFactor, formatInputKind, toNumber } from "@/lib/calc";
+import {
+  buildFormulaPlaceholders,
+  DEFAULT_ACTIVE_FORMULA_KEYS,
+  DEFAULT_FORMULAS,
+  extractFormulaIdentifiers,
+  FORMULA_LABELS,
+  FORMULA_SEQUENCE,
+  formatInputKind,
+  isFormulaRelevant,
+  PROVINCES,
+  toNumber,
+  validateFormula,
+} from "@/lib/calc";
 import { invokeRentalApi } from "@/lib/rental-api";
 import type {
   BootstrapPayload,
+  DwellingType,
+  InputKind,
   Lender,
-  LenderRule,
+  LenderFormulaKey,
   RentalVariable,
 } from "@/lib/types";
 
 function createDraftLender(): Lender {
   return {
     name: "",
-    baseAdjustment: 0,
     notes: "",
-    rules: [],
+    variableKeys: [],
+    activeFormulaKeys: [...DEFAULT_ACTIVE_FORMULA_KEYS],
+    provinceVacancyRates: {},
+    dwellingTypePercentages: {},
+    formulas: { ...DEFAULT_FORMULAS },
+  };
+}
+
+function normalizeLender(lender: Partial<Lender>): Lender {
+  return {
+    id: lender.id,
+    name: lender.name ?? "",
+    notes: lender.notes ?? "",
+    variableKeys: lender.variableKeys ?? [],
+    activeFormulaKeys: lender.activeFormulaKeys ?? [...DEFAULT_ACTIVE_FORMULA_KEYS],
+    provinceVacancyRates: lender.provinceVacancyRates ?? {},
+    dwellingTypePercentages: lender.dwellingTypePercentages ?? {},
+    formulas: {
+      ...DEFAULT_FORMULAS,
+      ...(lender.formulas ?? {}),
+    },
   };
 }
 
@@ -24,14 +57,93 @@ type LendersWorkspaceProps = {
   initialData: BootstrapPayload;
 };
 
+type VariableDraft = {
+  key: string;
+  label: string;
+  description: string;
+  inputKind: InputKind;
+  dependsOnKey: string;
+  dependsOnValue: string;
+  displayOrder: string;
+};
+
+type DwellingTypeDraft = {
+  key: string;
+  label: string;
+  displayOrder: string;
+};
+
+const EMPTY_VARIABLE_DRAFT: VariableDraft = {
+  key: "",
+  label: "",
+  description: "",
+  inputKind: "currency",
+  dependsOnKey: "",
+  dependsOnValue: "",
+  displayOrder: "0",
+};
+
+const EMPTY_DWELLING_TYPE_DRAFT: DwellingTypeDraft = {
+  key: "",
+  label: "",
+  displayOrder: "0",
+};
+
+function toVariableDraft(variable?: RentalVariable): VariableDraft {
+  if (!variable) {
+    return EMPTY_VARIABLE_DRAFT;
+  }
+
+  return {
+    key: variable.key,
+    label: variable.label,
+    description: variable.description,
+    inputKind: variable.inputKind,
+    dependsOnKey: variable.dependsOnKey ?? "",
+    dependsOnValue: variable.dependsOnValue === null ? "" : String(variable.dependsOnValue),
+    displayOrder: String(variable.displayOrder),
+  };
+}
+
+function toDwellingTypeDraft(dwellingType?: DwellingType): DwellingTypeDraft {
+  if (!dwellingType) {
+    return EMPTY_DWELLING_TYPE_DRAFT;
+  }
+
+  return {
+    key: dwellingType.key,
+    label: dwellingType.label,
+    displayOrder: String(dwellingType.displayOrder),
+  };
+}
+
+function toVariableKey(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
 export function LendersWorkspace({ initialData }: LendersWorkspaceProps) {
   const [variables, setVariables] = useState<RentalVariable[]>(initialData.variables);
+  const [dwellingTypes, setDwellingTypes] = useState<DwellingType[]>(
+    initialData.dwellingTypes ?? []
+  );
   const [lenders, setLenders] = useState<Lender[]>(
-    initialData.lenders.length > 0 ? initialData.lenders : [createDraftLender()]
+    initialData.lenders.length > 0
+      ? initialData.lenders.map(normalizeLender)
+      : [createDraftLender()]
   );
   const [focusedLenderIndex, setFocusedLenderIndex] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState<string | null>(null);
+  const [editingVariableKey, setEditingVariableKey] = useState<string | null>(null);
+  const [variableDraft, setVariableDraft] = useState<VariableDraft>(EMPTY_VARIABLE_DRAFT);
+  const [editingDwellingTypeKey, setEditingDwellingTypeKey] = useState<string | null>(null);
+  const [dwellingTypeDraft, setDwellingTypeDraft] =
+    useState<DwellingTypeDraft>(EMPTY_DWELLING_TYPE_DRAFT);
+  const [isVariableSaving, setIsVariableSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
   const refreshData = async () => {
@@ -39,8 +151,12 @@ export function LendersWorkspace({ initialData }: LendersWorkspaceProps) {
 
     try {
       const data = await invokeRentalApi<BootstrapPayload>("bootstrap");
-      const nextLenders = data.lenders.length > 0 ? data.lenders : [createDraftLender()];
-      setVariables(data.variables);
+      const nextLenders =
+        data.lenders.length > 0
+          ? data.lenders.map(normalizeLender)
+          : [createDraftLender()];
+      setVariables(data.variables ?? []);
+      setDwellingTypes(data.dwellingTypes ?? []);
       setLenders(nextLenders);
       setFocusedLenderIndex((current) => Math.min(current, nextLenders.length - 1));
     } catch (error) {
@@ -52,21 +168,12 @@ export function LendersWorkspace({ initialData }: LendersWorkspaceProps) {
 
   const focusedLender = lenders[focusedLenderIndex] ?? null;
 
-  const activeRules = useMemo(() => {
+  const activeVariables = useMemo(() => {
     if (!focusedLender) {
       return [];
     }
 
-    return [...focusedLender.rules].sort((left, right) => {
-      const leftOrder =
-        variables.find((variable) => variable.key === left.variableKey)?.displayOrder ??
-        Number.MAX_SAFE_INTEGER;
-      const rightOrder =
-        variables.find((variable) => variable.key === right.variableKey)?.displayOrder ??
-        Number.MAX_SAFE_INTEGER;
-
-      return leftOrder - rightOrder;
-    });
+    return variables.filter((variable) => focusedLender.variableKeys.includes(variable.key));
   }, [focusedLender, variables]);
 
   const availableVariables = useMemo(() => {
@@ -74,10 +181,44 @@ export function LendersWorkspace({ initialData }: LendersWorkspaceProps) {
       return [];
     }
 
-    return variables.filter(
-      (variable) =>
-        !focusedLender.rules.some((rule) => rule.variableKey === variable.key)
+    return variables.filter((variable) => !focusedLender.variableKeys.includes(variable.key));
+  }, [focusedLender, variables]);
+
+  const activeFormulaPlaceholders = useMemo(() => {
+    if (!focusedLender) {
+      return [];
+    }
+
+    const allPlaceholders = buildFormulaPlaceholders(variables);
+
+    const allowedVariableKeys = new Set(focusedLender.variableKeys);
+    const activeMetricKeys = new Set(
+      FORMULA_SEQUENCE.filter((formulaKey) =>
+        isFormulaRelevant(focusedLender, formulaKey)
+      )
     );
+
+    return allPlaceholders.filter((placeholder) => {
+      if (
+        placeholder.key === "provincial_vacancy_rate" ||
+        placeholder.key === "dwelling_type_percentage"
+      ) {
+        return true;
+      }
+
+      if (
+        placeholder.key === "vacancy_rate" ||
+        placeholder.key === "economic_rent" ||
+        placeholder.key === "maintenance" ||
+        placeholder.key === "vacancy_amount" ||
+        placeholder.key === "surplus_shortfall" ||
+        placeholder.key === "dcr"
+      ) {
+        return activeMetricKeys.has(placeholder.key);
+      }
+
+      return allowedVariableKeys.has(placeholder.key);
+    });
   }, [focusedLender, variables]);
 
   const updateLender = (index: number, nextValue: Partial<Lender>) => {
@@ -88,10 +229,96 @@ export function LendersWorkspace({ initialData }: LendersWorkspaceProps) {
     );
   };
 
-  const updateRule = (
+  const updateFormula = (
     lenderIndex: number,
-    variableKey: string,
-    nextValue: Partial<LenderRule>
+    formulaKey: LenderFormulaKey,
+    formula: string
+  ) => {
+    setLenders((current) =>
+      current.map((lender, index) =>
+        index === lenderIndex
+          ? {
+              ...lender,
+              formulas: {
+                ...lender.formulas,
+                [formulaKey]: formula,
+              },
+            }
+          : lender
+      )
+    );
+  };
+
+  const updateProvinceVacancyRate = (
+    lenderIndex: number,
+    provinceCode: keyof Lender["provinceVacancyRates"],
+    rawValue: string
+  ) => {
+    setLenders((current) =>
+      current.map((lender, index) =>
+        index === lenderIndex
+          ? {
+              ...lender,
+              provinceVacancyRates: {
+                ...lender.provinceVacancyRates,
+                [provinceCode]: toNumber(rawValue),
+              },
+            }
+          : lender
+      )
+    );
+  };
+
+  const updateDwellingTypePercentage = (
+    lenderIndex: number,
+    dwellingTypeKey: string,
+    rawValue: string
+  ) => {
+    setLenders((current) =>
+      current.map((lender, index) =>
+        index === lenderIndex
+          ? {
+              ...lender,
+              dwellingTypePercentages: {
+                ...lender.dwellingTypePercentages,
+                [dwellingTypeKey]: toNumber(rawValue),
+              },
+            }
+          : lender
+      )
+    );
+  };
+
+  const toggleFormulaRelevance = (
+    lenderIndex: number,
+    formulaKey: LenderFormulaKey
+  ) => {
+    if (formulaKey === "surplus_shortfall") {
+      return;
+    }
+
+    setLenders((current) =>
+      current.map((lender, index) => {
+        if (index !== lenderIndex) {
+          return lender;
+        }
+
+        const nextActiveFormulaKeys = lender.activeFormulaKeys.includes(formulaKey)
+          ? lender.activeFormulaKeys.filter((key) => key !== formulaKey)
+          : [...lender.activeFormulaKeys, formulaKey];
+
+        return {
+          ...lender,
+          activeFormulaKeys: nextActiveFormulaKeys,
+        };
+      })
+    );
+  };
+
+  const insertFormulaToken = (
+    lenderIndex: number,
+    formulaKey: LenderFormulaKey,
+    token: string
   ) => {
     setLenders((current) =>
       current.map((lender, index) => {
@@ -99,11 +326,17 @@ export function LendersWorkspace({ initialData }: LendersWorkspaceProps) {
           return lender;
         }
 
+        const currentFormula = lender.formulas[formulaKey].trim();
+        const nextFormula = currentFormula
+          ? `${currentFormula} ${token}`
+          : token;
+
         return {
           ...lender,
-          rules: lender.rules.map((rule) =>
-            rule.variableKey === variableKey ? { ...rule, ...nextValue } : rule
-          ),
+          formulas: {
+            ...lender.formulas,
+            [formulaKey]: nextFormula,
+          },
         };
       })
     );
@@ -117,45 +350,31 @@ export function LendersWorkspace({ initialData }: LendersWorkspaceProps) {
     });
   };
 
-  const handleAddVariable = (lenderIndex: number, variable: RentalVariable) => {
+  const toggleVariable = (lenderIndex: number, variableKey: string) => {
     setLenders((current) =>
       current.map((lender, index) => {
         if (index !== lenderIndex) {
           return lender;
         }
 
-        if (lender.rules.some((rule) => rule.variableKey === variable.key)) {
-          return lender;
-        }
+        const nextVariableKeys = lender.variableKeys.includes(variableKey)
+          ? lender.variableKeys.filter((key) => key !== variableKey)
+          : [...lender.variableKeys, variableKey];
+
+        nextVariableKeys.sort((left, right) => {
+          const leftOrder =
+            variables.find((variable) => variable.key === left)?.displayOrder ?? 0;
+          const rightOrder =
+            variables.find((variable) => variable.key === right)?.displayOrder ?? 0;
+
+          return leftOrder - rightOrder;
+        });
 
         return {
           ...lender,
-          rules: [
-            ...lender.rules,
-            {
-              variableKey: variable.key,
-              impactDirection: "increase",
-              calculationMode: "ignore",
-              factor: 1,
-              referenceVariableKey: variable.defaultReferenceKey,
-              notes: "",
-            },
-          ],
+          variableKeys: nextVariableKeys,
         };
       })
-    );
-  };
-
-  const handleRemoveVariable = (lenderIndex: number, variableKey: string) => {
-    setLenders((current) =>
-      current.map((lender, index) =>
-        index === lenderIndex
-          ? {
-              ...lender,
-              rules: lender.rules.filter((rule) => rule.variableKey !== variableKey),
-            }
-          : lender
-      )
     );
   };
 
@@ -163,6 +382,38 @@ export function LendersWorkspace({ initialData }: LendersWorkspaceProps) {
     if (!lender.name.trim()) {
       setMessage("Each lender needs a name before it can be saved.");
       return;
+    }
+
+    if (lender.variableKeys.length === 0) {
+      setMessage("Add at least one client input field for the lender.");
+      return;
+    }
+
+    for (const formulaKey of FORMULA_SEQUENCE) {
+      if (!isFormulaRelevant(lender, formulaKey)) {
+        continue;
+      }
+
+      const validationError = validateFormula(lender.formulas[formulaKey], variables);
+
+      if (validationError) {
+        setMessage(`${FORMULA_LABELS[formulaKey]}: ${validationError}`);
+        return;
+      }
+
+      const identifiers = extractFormulaIdentifiers(lender.formulas[formulaKey]);
+      const disallowedInput = identifiers.find(
+        (identifier) =>
+          variables.some((variable) => variable.key === identifier) &&
+          !lender.variableKeys.includes(identifier)
+      );
+
+      if (disallowedInput) {
+        setMessage(
+          `${FORMULA_LABELS[formulaKey]} uses ${disallowedInput}, but that input is not enabled for this lender.`
+        );
+        return;
+      }
     }
 
     setIsSaving(lender.id ?? `draft-${lenderIndex}`);
@@ -212,11 +463,204 @@ export function LendersWorkspace({ initialData }: LendersWorkspaceProps) {
     }
   };
 
+  const updateVariableDraft = (nextValue: Partial<VariableDraft>) => {
+    setVariableDraft((current) => ({ ...current, ...nextValue }));
+  };
+
+  const handleNewVariable = () => {
+    setEditingVariableKey(null);
+    setVariableDraft(EMPTY_VARIABLE_DRAFT);
+    setMessage(null);
+  };
+
+  const handleEditVariable = (variable: RentalVariable) => {
+    setEditingVariableKey(variable.key);
+    setVariableDraft(toVariableDraft(variable));
+    setMessage(null);
+  };
+
+  const handleVariableLabelChange = (label: string) => {
+    setVariableDraft((current) => {
+      const shouldRegenerateKey =
+        !editingVariableKey &&
+        (!current.key || current.key === toVariableKey(current.label));
+
+      return {
+        ...current,
+        label,
+        key: shouldRegenerateKey ? toVariableKey(label) : current.key,
+      };
+    });
+  };
+
+  const handleSaveVariable = async () => {
+    const key = toVariableKey(variableDraft.key);
+    const label = variableDraft.label.trim();
+
+    if (!key) {
+      setMessage("Each available input needs a key.");
+      return;
+    }
+
+    if (!label) {
+      setMessage("Each available input needs a label.");
+      return;
+    }
+
+    setIsVariableSaving(true);
+    setMessage(null);
+
+    try {
+      await invokeRentalApi("save_variable", {
+        variable: {
+          key,
+          label,
+          description: variableDraft.description.trim(),
+          inputKind: variableDraft.inputKind,
+          dependsOnKey: variableDraft.dependsOnKey || null,
+          dependsOnValue:
+            variableDraft.dependsOnValue === ""
+              ? null
+              : Number(variableDraft.dependsOnValue),
+          displayOrder: Number(variableDraft.displayOrder) || 0,
+        },
+      });
+      await refreshData();
+      handleNewVariable();
+      setMessage(`Saved available input ${label}.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Unable to save input.");
+    } finally {
+      setIsVariableSaving(false);
+    }
+  };
+
+  const handleDeleteVariable = async (variable: RentalVariable) => {
+    const confirmed = window.confirm(`Delete ${variable.label}?`);
+
+    if (!confirmed) {
+      return;
+    }
+
+    setIsVariableSaving(true);
+    setMessage(null);
+
+    try {
+      await invokeRentalApi("delete_variable", {
+        variableKey: variable.key,
+      });
+      await refreshData();
+      if (editingVariableKey === variable.key) {
+        handleNewVariable();
+      }
+      setMessage(`Deleted available input ${variable.label}.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Unable to delete input.");
+    } finally {
+      setIsVariableSaving(false);
+    }
+  };
+
+  const updateDwellingTypeDraft = (nextValue: Partial<DwellingTypeDraft>) => {
+    setDwellingTypeDraft((current) => ({ ...current, ...nextValue }));
+  };
+
+  const handleNewDwellingType = () => {
+    setEditingDwellingTypeKey(null);
+    setDwellingTypeDraft(EMPTY_DWELLING_TYPE_DRAFT);
+    setMessage(null);
+  };
+
+  const handleEditDwellingType = (dwellingType: DwellingType) => {
+    setEditingDwellingTypeKey(dwellingType.key);
+    setDwellingTypeDraft(toDwellingTypeDraft(dwellingType));
+    setMessage(null);
+  };
+
+  const handleDwellingTypeLabelChange = (label: string) => {
+    setDwellingTypeDraft((current) => {
+      const shouldRegenerateKey =
+        !editingDwellingTypeKey &&
+        (!current.key || current.key === toVariableKey(current.label));
+
+      return {
+        ...current,
+        label,
+        key: shouldRegenerateKey ? toVariableKey(label) : current.key,
+      };
+    });
+  };
+
+  const handleSaveDwellingType = async () => {
+    const key = toVariableKey(dwellingTypeDraft.key);
+    const label = dwellingTypeDraft.label.trim();
+
+    if (!key) {
+      setMessage("Each dwelling type needs a key.");
+      return;
+    }
+
+    if (!label) {
+      setMessage("Each dwelling type needs a label.");
+      return;
+    }
+
+    setIsVariableSaving(true);
+    setMessage(null);
+
+    try {
+      await invokeRentalApi("save_dwelling_type", {
+        dwellingType: {
+          key,
+          label,
+          displayOrder: Number(dwellingTypeDraft.displayOrder) || 0,
+        },
+      });
+      await refreshData();
+      handleNewDwellingType();
+      setMessage(`Saved dwelling type ${label}.`);
+    } catch (error) {
+      setMessage(
+        error instanceof Error ? error.message : "Unable to save dwelling type."
+      );
+    } finally {
+      setIsVariableSaving(false);
+    }
+  };
+
+  const handleDeleteDwellingType = async (dwellingType: DwellingType) => {
+    const confirmed = window.confirm(`Delete ${dwellingType.label}?`);
+
+    if (!confirmed) {
+      return;
+    }
+
+    setIsVariableSaving(true);
+    setMessage(null);
+
+    try {
+      await invokeRentalApi("delete_dwelling_type", {
+        dwellingTypeKey: dwellingType.key,
+      });
+      await refreshData();
+      if (editingDwellingTypeKey === dwellingType.key) {
+        handleNewDwellingType();
+      }
+      setMessage(`Deleted dwelling type ${dwellingType.label}.`);
+    } catch (error) {
+      setMessage(
+        error instanceof Error ? error.message : "Unable to delete dwelling type."
+      );
+    } finally {
+      setIsVariableSaving(false);
+    }
+  };
+
   return (
     <AppShell
-      title="Lender-by-lender rental criteria"
+      title="Lender-by-lender rental formulas"
       eyebrow="Page 1"
-      description="Use the lender list on the left to move between lenders, then define the variables and rule behavior for the currently selected lender."
+      description="Pick one lender from the list, choose the client inputs that lender needs, and define the formulas used to calculate vacancy, maintenance, surplus or shortfall, and DCR."
     >
       <section className="grid gap-6 xl:grid-cols-[340px_minmax(0,1fr)]">
         <aside className="glass-panel rounded-[28px] p-6">
@@ -228,8 +672,8 @@ export function LendersWorkspace({ initialData }: LendersWorkspaceProps) {
               Choose a lender to edit
             </h2>
             <p className="text-sm leading-7 text-[var(--muted)]">
-              This list comes from the database. Select a lender to manage its variables,
-              calculation directions, factors, and notes.
+              This list comes from the database. Select a lender to edit its required
+              client inputs and formula set, or create a new lender.
             </p>
           </div>
 
@@ -260,8 +704,8 @@ export function LendersWorkspace({ initialData }: LendersWorkspaceProps) {
                     {lender.name.trim() || `Untitled Lender ${lenderIndex + 1}`}
                   </p>
                   <p className="mt-1 text-sm leading-6 text-[var(--muted)]">
-                    {lender.rules.length} active variable
-                    {lender.rules.length === 1 ? "" : "s"}
+                    {lender.variableKeys.length} required input
+                    {lender.variableKeys.length === 1 ? "" : "s"}
                   </p>
                 </button>
               );
@@ -278,7 +722,7 @@ export function LendersWorkspace({ initialData }: LendersWorkspaceProps) {
 
           {isLoading ? (
             <div className="glass-panel rounded-[28px] px-6 py-10 text-center text-sm text-[var(--muted)]">
-              Loading lender rules...
+              Loading lender formulas...
             </div>
           ) : null}
 
@@ -304,7 +748,7 @@ export function LendersWorkspace({ initialData }: LendersWorkspaceProps) {
                 </button>
               </div>
 
-              <div className="mt-6 grid gap-4 lg:grid-cols-[1fr_160px]">
+              <div className="mt-6 grid gap-4">
                 <label className="space-y-2">
                   <span className="text-sm font-medium">Lender name</span>
                   <input
@@ -313,21 +757,6 @@ export function LendersWorkspace({ initialData }: LendersWorkspaceProps) {
                       updateLender(focusedLenderIndex, { name: event.target.value })
                     }
                     placeholder="Example: RBC Rental Program"
-                    className="w-full rounded-2xl border border-[var(--line)] bg-white px-4 py-3 outline-none transition focus:border-[var(--accent)]"
-                  />
-                </label>
-
-                <label className="space-y-2">
-                  <span className="text-sm font-medium">Base adjustment</span>
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={focusedLender.baseAdjustment}
-                    onChange={(event) =>
-                      updateLender(focusedLenderIndex, {
-                        baseAdjustment: toNumber(event.target.value),
-                      })
-                    }
                     className="w-full rounded-2xl border border-[var(--line)] bg-white px-4 py-3 outline-none transition focus:border-[var(--accent)]"
                   />
                 </label>
@@ -342,185 +771,250 @@ export function LendersWorkspace({ initialData }: LendersWorkspaceProps) {
                   }
                   rows={3}
                   className="w-full rounded-2xl border border-[var(--line)] bg-white px-4 py-3 outline-none transition focus:border-[var(--accent)]"
-                  placeholder="Optional guidance for this lender."
+                  placeholder="Optional underwriting notes for this lender."
                 />
               </label>
 
-              <div className="mt-6 rounded-3xl border border-[var(--line)] bg-white/70 p-4">
-                <p className="font-mono text-xs uppercase tracking-[0.25em] text-[var(--muted)]">
-                  Available Variables
-                </p>
-                <p className="mt-2 text-sm leading-7 text-[var(--muted)]">
-                  Add variables for the currently selected lender. Removed variables return to
-                  this list.
-                </p>
+              <div className="mt-6 grid gap-6 lg:grid-cols-2">
+                <div className="rounded-3xl border border-[var(--line)] bg-white/70 p-4">
+                  <p className="font-mono text-xs uppercase tracking-[0.25em] text-[var(--muted)]">
+                    Required Client Inputs
+                  </p>
+                  <p className="mt-2 text-sm leading-7 text-[var(--muted)]">
+                    Click a field to remove it from this lender. The client calculator only
+                    asks for fields required by the lenders being checked.
+                  </p>
 
-                <div className="mt-4 flex flex-wrap gap-2">
-                  {availableVariables.length > 0 ? (
-                    availableVariables.map((variable) => (
-                      <button
-                        key={variable.key}
-                        type="button"
-                        onClick={() => handleAddVariable(focusedLenderIndex, variable)}
-                        className="rounded-full border border-[var(--line)] bg-white px-4 py-2 text-sm transition hover:border-[var(--accent)] hover:text-[var(--accent-strong)]"
-                      >
-                        Add {variable.label}
-                      </button>
-                    ))
-                  ) : (
-                    <p className="text-sm text-[var(--muted)]">
-                      All catalog variables are already active for this lender.
-                    </p>
-                  )}
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {activeVariables.length > 0 ? (
+                      activeVariables.map((variable) => (
+                        <button
+                          key={variable.key}
+                          type="button"
+                          onClick={() => toggleVariable(focusedLenderIndex, variable.key)}
+                          className="rounded-full bg-amber-100 px-4 py-2 text-sm text-amber-950 ring-1 ring-amber-300 transition hover:bg-amber-200"
+                        >
+                          {variable.label} Remove
+                        </button>
+                      ))
+                    ) : (
+                      <p className="text-sm text-[var(--muted)]">
+                        No client inputs selected yet.
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="rounded-3xl border border-[var(--line)] bg-white/70 p-4">
+                  <p className="font-mono text-xs uppercase tracking-[0.25em] text-[var(--muted)]">
+                    Available Inputs
+                  </p>
+                  <p className="mt-2 text-sm leading-7 text-[var(--muted)]">
+                    Click an input to add it to this lender.
+                  </p>
+
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {availableVariables.length > 0 ? (
+                      availableVariables.map((variable) => (
+                        <button
+                          key={variable.key}
+                          type="button"
+                          onClick={() => toggleVariable(focusedLenderIndex, variable.key)}
+                          className="rounded-full border border-[var(--line)] bg-white px-4 py-2 text-sm transition hover:border-[var(--accent)] hover:text-[var(--accent-strong)]"
+                        >
+                          {variable.label}
+                        </button>
+                      ))
+                    ) : (
+                      <p className="text-sm text-[var(--muted)]">
+                        All fixed input fields are already attached to this lender.
+                      </p>
+                    )}
+                  </div>
                 </div>
               </div>
 
-              <div className="mt-6 overflow-x-auto">
-                <table className="min-w-full border-separate border-spacing-y-3">
-                  <thead>
-                    <tr className="text-left text-xs uppercase tracking-[0.2em] text-[var(--muted)]">
-                      <th className="pb-2">Variable</th>
-                      <th className="pb-2">Direction</th>
-                      <th className="pb-2">Mode</th>
-                      <th className="pb-2">Factor</th>
-                      <th className="pb-2">Reference</th>
-                      <th className="pb-2">Notes</th>
-                      <th className="pb-2">Remove</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {activeRules.length > 0 ? (
-                      activeRules.map((rule) => {
-                        const variable = variables.find(
-                          (item) => item.key === rule.variableKey
-                        );
+              {isFormulaRelevant(focusedLender, "vacancy_rate") ? (
+                <div className="mt-6 rounded-3xl border border-[var(--line)] bg-white/70 p-5">
+                  <p className="font-mono text-xs uppercase tracking-[0.25em] text-[var(--muted)]">
+                    Province Vacancy Rates
+                  </p>
+                  <p className="mt-2 text-sm leading-7 text-[var(--muted)]">
+                    Set the vacancy percentage this lender uses for each province. Use the
+                    `provincial_vacancy_rate` placeholder inside formulas.
+                  </p>
 
-                        if (!variable) {
-                          return null;
-                        }
+                  <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                    {PROVINCES.map((province) => (
+                      <label
+                        key={province.code}
+                        className="rounded-2xl border border-[var(--line)] bg-white p-4"
+                      >
+                        <span className="block text-sm font-medium">
+                          {province.label}
+                        </span>
+                        <input
+                          type="number"
+                          step="0.0001"
+                          value={focusedLender.provinceVacancyRates[province.code] ?? 0}
+                          onChange={(event) =>
+                            updateProvinceVacancyRate(
+                              focusedLenderIndex,
+                              province.code,
+                              event.target.value
+                            )
+                          }
+                          className="mt-3 w-full rounded-2xl border border-[var(--line)] bg-white px-4 py-3"
+                        />
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
 
-                        return (
-                          <tr key={variable.key}>
-                            <td className="rounded-l-2xl border-y border-l border-[var(--line)] bg-white/75 px-4 py-3 align-top">
-                              <p className="font-medium">{variable.label}</p>
-                              <p className="mt-1 text-xs leading-6 text-[var(--muted)]">
-                                {variable.description}
-                              </p>
-                              <p className="mt-2 text-xs text-[var(--muted)]">
-                                {formatInputKind(variable.inputKind)}
-                              </p>
-                            </td>
-                            <td className="border-y border-[var(--line)] bg-white/75 px-4 py-3 align-top">
-                              <select
-                                value={rule.impactDirection}
-                                onChange={(event) =>
-                                  updateRule(focusedLenderIndex, variable.key, {
-                                    impactDirection:
-                                      event.target.value as LenderRule["impactDirection"],
-                                  })
-                                }
-                                className="w-full rounded-xl border border-[var(--line)] bg-white px-3 py-2"
-                              >
-                                <option value="increase">Increase</option>
-                                <option value="decrease">Decrease</option>
-                              </select>
-                            </td>
-                            <td className="border-y border-[var(--line)] bg-white/75 px-4 py-3 align-top">
-                              <select
-                                value={rule.calculationMode}
-                                onChange={(event) =>
-                                  updateRule(focusedLenderIndex, variable.key, {
-                                    calculationMode:
-                                      event.target.value as LenderRule["calculationMode"],
-                                  })
-                                }
-                                className="w-full rounded-xl border border-[var(--line)] bg-white px-3 py-2"
-                              >
-                                <option value="ignore">Ignore</option>
-                                <option value="value">Raw value</option>
-                                <option value="value_times_factor">Value x factor</option>
-                                <option value="percent_of_reference">
-                                  Percent of reference
-                                </option>
-                              </select>
-                            </td>
-                            <td className="border-y border-[var(--line)] bg-white/75 px-4 py-3 align-top">
-                              <input
-                                type="number"
-                                step="0.0001"
-                                value={rule.factor}
-                                onChange={(event) =>
-                                  updateRule(focusedLenderIndex, variable.key, {
-                                    factor: toNumber(event.target.value),
-                                  })
-                                }
-                                className="w-full rounded-xl border border-[var(--line)] bg-white px-3 py-2"
-                              />
-                              <p className="mt-2 text-xs text-[var(--muted)]">
-                                {formatFactor(rule.factor, rule.calculationMode)}
-                              </p>
-                            </td>
-                            <td className="border-y border-[var(--line)] bg-white/75 px-4 py-3 align-top">
-                              <select
-                                value={rule.referenceVariableKey ?? ""}
-                                onChange={(event) =>
-                                  updateRule(focusedLenderIndex, variable.key, {
-                                    referenceVariableKey: event.target.value || null,
-                                  })
-                                }
-                                className="w-full rounded-xl border border-[var(--line)] bg-white px-3 py-2"
-                              >
-                                <option value="">None</option>
-                                {variables.map((reference) => (
-                                  <option key={reference.key} value={reference.key}>
-                                    {reference.label}
-                                  </option>
-                                ))}
-                              </select>
-                            </td>
-                            <td className="border-y border-[var(--line)] bg-white/75 px-4 py-3 align-top">
-                              <textarea
-                                value={rule.notes ?? ""}
-                                onChange={(event) =>
-                                  updateRule(focusedLenderIndex, variable.key, {
-                                    notes: event.target.value,
-                                  })
-                                }
-                                rows={2}
-                                className="w-full rounded-xl border border-[var(--line)] bg-white px-3 py-2"
-                                placeholder="Optional note"
-                              />
-                            </td>
-                            <td className="rounded-r-2xl border-y border-r border-[var(--line)] bg-white/75 px-4 py-3 align-top">
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  handleRemoveVariable(focusedLenderIndex, variable.key)
-                                }
-                                className="rounded-full border border-[var(--line)] px-4 py-2 text-sm transition hover:border-[var(--danger)] hover:text-[var(--danger)]"
-                              >
-                                Remove
-                              </button>
-                            </td>
-                          </tr>
-                        );
-                      })
-                    ) : (
-                      <tr>
-                        <td
-                          colSpan={7}
-                          className="rounded-2xl border border-[var(--line)] bg-white/75 px-4 py-6 text-sm text-[var(--muted)]"
+              {isFormulaRelevant(focusedLender, "vacancy_rate") ? (
+                <div className="mt-6 rounded-3xl border border-[var(--line)] bg-white/70 p-5">
+                  <p className="font-mono text-xs uppercase tracking-[0.25em] text-[var(--muted)]">
+                    Dwelling Type Percentages
+                  </p>
+                  <p className="mt-2 text-sm leading-7 text-[var(--muted)]">
+                    Set the percentage this lender uses for each dwelling type. Use the
+                    `dwelling_type_percentage` placeholder inside formulas.
+                  </p>
+
+                  <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                    {dwellingTypes.map((dwellingType) => (
+                      <label
+                        key={dwellingType.key}
+                        className="rounded-2xl border border-[var(--line)] bg-white p-4"
+                      >
+                        <span className="block text-sm font-medium">
+                          {dwellingType.label}
+                        </span>
+                        <input
+                          type="number"
+                          step="0.0001"
+                          value={
+                            focusedLender.dwellingTypePercentages[dwellingType.key] ?? 0
+                          }
+                          onChange={(event) =>
+                            updateDwellingTypePercentage(
+                              focusedLenderIndex,
+                              dwellingType.key,
+                              event.target.value
+                            )
+                          }
+                          className="mt-3 w-full rounded-2xl border border-[var(--line)] bg-white px-4 py-3"
+                        />
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="mt-6 rounded-3xl border border-[var(--line)] bg-white/70 p-5">
+                <div className="mb-5">
+                  <p className="font-mono text-xs uppercase tracking-[0.25em] text-[var(--muted)]">
+                    Relevant Metrics
+                  </p>
+                  <p className="mt-2 text-sm leading-7 text-[var(--muted)]">
+                    Surplus / shortfall is always active. Turn on the other metrics only if
+                    this lender uses them.
+                  </p>
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {FORMULA_SEQUENCE.map((formulaKey) => {
+                      const isForced = formulaKey === "surplus_shortfall";
+                      const isActive =
+                        isForced ||
+                        focusedLender.activeFormulaKeys.includes(formulaKey);
+
+                      return (
+                        <button
+                          key={`relevance-${formulaKey}`}
+                          type="button"
+                          onClick={() =>
+                            toggleFormulaRelevance(focusedLenderIndex, formulaKey)
+                          }
+                          disabled={isForced}
+                          className={`rounded-full px-4 py-2 text-sm transition ${
+                            isActive
+                              ? "bg-amber-100 text-amber-950 ring-1 ring-amber-300"
+                              : "border border-[var(--line)] bg-white hover:border-[var(--accent)]"
+                          } ${isForced ? "cursor-default opacity-90" : ""}`}
                         >
-                          No variables added yet. Use the available variables list above to
-                          add them for this lender.
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
+                          {FORMULA_LABELS[formulaKey]}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-start justify-between gap-4">
+                  <div>
+                    <p className="font-mono text-xs uppercase tracking-[0.25em] text-[var(--muted)]">
+                      Formula Builder
+                    </p>
+                    <p className="mt-2 text-sm leading-7 text-[var(--muted)]">
+                      Use the variable keys directly in formulas. Earlier outputs can be
+                      reused by later formulas.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mt-5 grid gap-4">
+                  {FORMULA_SEQUENCE.filter((formulaKey) =>
+                    isFormulaRelevant(focusedLender, formulaKey)
+                  ).map((formulaKey) => (
+                    <label
+                      key={formulaKey}
+                      className="rounded-2xl border border-[var(--line)] bg-white p-4"
+                    >
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="block text-sm font-medium">
+                          {FORMULA_LABELS[formulaKey]}
+                        </span>
+                        <span className="text-xs text-[var(--muted)]">
+                          {formulaKey === "surplus_shortfall"
+                            ? "Always active"
+                            : "Relevant"}
+                        </span>
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {activeFormulaPlaceholders.map((placeholder) => (
+                          <button
+                            key={`${formulaKey}-${placeholder.key}`}
+                            type="button"
+                            onClick={() =>
+                              insertFormulaToken(
+                                focusedLenderIndex,
+                                formulaKey,
+                                placeholder.key
+                              )
+                            }
+                            className="rounded-full border border-[var(--line)] bg-white px-3 py-1 text-xs transition hover:border-[var(--accent)]"
+                          >
+                            {placeholder.label}
+                          </button>
+                        ))}
+                      </div>
+                      <textarea
+                        value={focusedLender.formulas[formulaKey]}
+                        onChange={(event) =>
+                          updateFormula(
+                            focusedLenderIndex,
+                            formulaKey,
+                            event.target.value
+                          )
+                        }
+                        rows={2}
+                        className="mt-3 w-full rounded-2xl border border-[var(--line)] bg-white px-4 py-3 font-mono text-sm outline-none transition focus:border-[var(--accent)]"
+                      />
+                    </label>
+                  ))}
+                </div>
               </div>
 
-              <div className="mt-6 flex flex-wrap justify-end gap-3">
+              <div className="mt-6 flex flex-wrap gap-3">
                 <button
                   type="button"
                   onClick={() => handleSave(focusedLender, focusedLenderIndex)}
@@ -535,6 +1029,308 @@ export function LendersWorkspace({ initialData }: LendersWorkspaceProps) {
             </article>
           ) : null}
         </section>
+      </section>
+
+      <section className="mt-6 grid gap-6 xl:grid-cols-2">
+        <article className="glass-panel rounded-[28px] p-6">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <p className="font-mono text-xs uppercase tracking-[0.25em] text-[var(--muted)]">
+                Available Inputs
+              </p>
+              <h2 className="mt-2 text-2xl font-semibold tracking-[-0.03em]">
+                Global input catalog
+              </h2>
+              <p className="mt-2 text-sm leading-7 text-[var(--muted)]">
+                Add or remove calculator inputs here. Inputs can be numeric, percent,
+                currency, or yes/no, and can optionally depend on another input value.
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleNewVariable}
+              className="rounded-full border border-[var(--line)] px-4 py-2 text-sm transition hover:border-[var(--accent)]"
+            >
+              New input
+            </button>
+          </div>
+
+          <div className="mt-5 space-y-3">
+            {variables.map((variable) => (
+              <div
+                key={variable.key}
+                className="rounded-2xl border border-[var(--line)] bg-white/75 p-4"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-4">
+                  <div className="min-w-[240px] flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="font-medium">{variable.label}</p>
+                      <span className="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-700">
+                        {formatInputKind(variable.inputKind)}
+                      </span>
+                      <span className="rounded-full bg-slate-100 px-3 py-1 font-mono text-xs text-slate-700">
+                        {variable.key}
+                      </span>
+                    </div>
+                    <p className="mt-2 text-sm leading-6 text-[var(--muted)]">
+                      {variable.description || "No description saved."}
+                    </p>
+                    {variable.dependsOnKey ? (
+                      <p className="mt-2 text-xs text-[var(--muted)]">
+                        Visible when `{variable.dependsOnKey}` ={" "}
+                        {String(variable.dependsOnValue ?? 0)}
+                      </p>
+                    ) : null}
+                  </div>
+
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleEditVariable(variable)}
+                      className="rounded-full border border-[var(--line)] px-4 py-2 text-sm transition hover:border-[var(--accent)]"
+                    >
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteVariable(variable)}
+                      className="rounded-full border border-[var(--line)] px-4 py-2 text-sm transition hover:border-[var(--danger)] hover:text-[var(--danger)]"
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-6 grid gap-4 rounded-3xl border border-[var(--line)] bg-white/70 p-5">
+            <label className="space-y-2">
+              <span className="text-sm font-medium">Input key</span>
+              <input
+                value={variableDraft.key}
+                onChange={(event) =>
+                  updateVariableDraft({ key: toVariableKey(event.target.value) })
+                }
+                disabled={Boolean(editingVariableKey)}
+                className="w-full rounded-2xl border border-[var(--line)] bg-white px-4 py-3 font-mono outline-none transition focus:border-[var(--accent)] disabled:bg-slate-50 disabled:text-[var(--muted)]"
+              />
+            </label>
+
+            <label className="space-y-2">
+              <span className="text-sm font-medium">Label</span>
+              <input
+                value={variableDraft.label}
+                onChange={(event) => handleVariableLabelChange(event.target.value)}
+                className="w-full rounded-2xl border border-[var(--line)] bg-white px-4 py-3 outline-none transition focus:border-[var(--accent)]"
+              />
+            </label>
+
+            <label className="space-y-2">
+              <span className="text-sm font-medium">Type</span>
+              <select
+                value={variableDraft.inputKind}
+                onChange={(event) =>
+                  updateVariableDraft({
+                    inputKind: event.target.value as InputKind,
+                  })
+                }
+                className="w-full rounded-2xl border border-[var(--line)] bg-white px-4 py-3"
+              >
+                <option value="currency">Dollar / currency</option>
+                <option value="percent">Percentage</option>
+                <option value="number">Plain number</option>
+                <option value="boolean">Yes / no</option>
+              </select>
+            </label>
+
+            <label className="space-y-2">
+              <span className="text-sm font-medium">Show only when input</span>
+              <select
+                value={variableDraft.dependsOnKey}
+                onChange={(event) =>
+                  updateVariableDraft({ dependsOnKey: event.target.value })
+                }
+                className="w-full rounded-2xl border border-[var(--line)] bg-white px-4 py-3"
+              >
+                <option value="">Always visible</option>
+                {variables
+                  .filter((variable) => variable.key !== editingVariableKey)
+                  .map((variable) => (
+                    <option key={variable.key} value={variable.key}>
+                      {variable.label}
+                    </option>
+                  ))}
+              </select>
+            </label>
+
+            <label className="space-y-2">
+              <span className="text-sm font-medium">Dependent value</span>
+              <input
+                type="number"
+                value={variableDraft.dependsOnValue}
+                onChange={(event) =>
+                  updateVariableDraft({ dependsOnValue: event.target.value })
+                }
+                className="w-full rounded-2xl border border-[var(--line)] bg-white px-4 py-3"
+              />
+            </label>
+
+            <label className="space-y-2">
+              <span className="text-sm font-medium">Display order</span>
+              <input
+                type="number"
+                value={variableDraft.displayOrder}
+                onChange={(event) =>
+                  updateVariableDraft({ displayOrder: event.target.value })
+                }
+                className="w-full rounded-2xl border border-[var(--line)] bg-white px-4 py-3"
+              />
+            </label>
+
+            <label className="space-y-2">
+              <span className="text-sm font-medium">Description</span>
+              <textarea
+                value={variableDraft.description}
+                onChange={(event) =>
+                  updateVariableDraft({ description: event.target.value })
+                }
+                rows={3}
+                className="w-full rounded-2xl border border-[var(--line)] bg-white px-4 py-3"
+              />
+            </label>
+
+            <div className="flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={handleSaveVariable}
+                disabled={isVariableSaving}
+                className="rounded-full bg-[var(--accent)] px-5 py-3 text-sm font-medium text-white transition hover:bg-[var(--accent-strong)] disabled:cursor-not-allowed disabled:opacity-70"
+              >
+                {isVariableSaving ? "Saving..." : "Save input"}
+              </button>
+              <button
+                type="button"
+                onClick={handleNewVariable}
+                className="rounded-full border border-[var(--line)] px-5 py-3 text-sm transition hover:border-[var(--accent)]"
+              >
+                Reset form
+              </button>
+            </div>
+          </div>
+        </article>
+
+        <article className="glass-panel rounded-[28px] p-6">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <p className="font-mono text-xs uppercase tracking-[0.25em] text-[var(--muted)]">
+                Dwelling Types
+              </p>
+              <h2 className="mt-2 text-2xl font-semibold tracking-[-0.03em]">
+                Global dwelling type catalog
+              </h2>
+              <p className="mt-2 text-sm leading-7 text-[var(--muted)]">
+                Add or remove dwelling types here. Lenders can then define a percentage
+                for each one and formulas can reference `dwelling_type_percentage`.
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleNewDwellingType}
+              className="rounded-full border border-[var(--line)] px-4 py-2 text-sm transition hover:border-[var(--accent)]"
+            >
+              New dwelling type
+            </button>
+          </div>
+
+          <div className="mt-5 space-y-3">
+            {dwellingTypes.map((dwellingType) => (
+              <div
+                key={dwellingType.key}
+                className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-[var(--line)] bg-white/75 p-4"
+              >
+                <div>
+                  <p className="font-medium">{dwellingType.label}</p>
+                  <p className="mt-1 font-mono text-xs text-[var(--muted)]">
+                    {dwellingType.key}
+                  </p>
+                </div>
+
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleEditDwellingType(dwellingType)}
+                    className="rounded-full border border-[var(--line)] px-4 py-2 text-sm transition hover:border-[var(--accent)]"
+                  >
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteDwellingType(dwellingType)}
+                    className="rounded-full border border-[var(--line)] px-4 py-2 text-sm transition hover:border-[var(--danger)] hover:text-[var(--danger)]"
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-6 grid gap-4 rounded-3xl border border-[var(--line)] bg-white/70 p-5">
+            <label className="space-y-2">
+              <span className="text-sm font-medium">Dwelling type key</span>
+              <input
+                value={dwellingTypeDraft.key}
+                onChange={(event) =>
+                  updateDwellingTypeDraft({ key: toVariableKey(event.target.value) })
+                }
+                disabled={Boolean(editingDwellingTypeKey)}
+                className="w-full rounded-2xl border border-[var(--line)] bg-white px-4 py-3 font-mono disabled:bg-slate-50 disabled:text-[var(--muted)]"
+              />
+            </label>
+
+            <label className="space-y-2">
+              <span className="text-sm font-medium">Label</span>
+              <input
+                value={dwellingTypeDraft.label}
+                onChange={(event) => handleDwellingTypeLabelChange(event.target.value)}
+                className="w-full rounded-2xl border border-[var(--line)] bg-white px-4 py-3"
+              />
+            </label>
+
+            <label className="space-y-2">
+              <span className="text-sm font-medium">Display order</span>
+              <input
+                type="number"
+                value={dwellingTypeDraft.displayOrder}
+                onChange={(event) =>
+                  updateDwellingTypeDraft({ displayOrder: event.target.value })
+                }
+                className="w-full rounded-2xl border border-[var(--line)] bg-white px-4 py-3"
+              />
+            </label>
+
+            <div className="flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={handleSaveDwellingType}
+                disabled={isVariableSaving}
+                className="rounded-full bg-[var(--accent)] px-5 py-3 text-sm font-medium text-white transition hover:bg-[var(--accent-strong)] disabled:cursor-not-allowed disabled:opacity-70"
+              >
+                {isVariableSaving ? "Saving..." : "Save dwelling type"}
+              </button>
+              <button
+                type="button"
+                onClick={handleNewDwellingType}
+                className="rounded-full border border-[var(--line)] px-5 py-3 text-sm transition hover:border-[var(--accent)]"
+              >
+                Reset form
+              </button>
+            </div>
+          </div>
+        </article>
       </section>
     </AppShell>
   );

@@ -1,37 +1,65 @@
-export type InputKind = "currency" | "percent" | "number";
+export type InputKind = "currency" | "percent" | "number" | "boolean";
 
-export type CalculationMode =
-  | "ignore"
-  | "value"
-  | "value_times_factor"
-  | "percent_of_reference";
+export type ProvinceCode =
+  | "AB"
+  | "BC"
+  | "MB"
+  | "NB"
+  | "NL"
+  | "NS"
+  | "NT"
+  | "NU"
+  | "ON"
+  | "PE"
+  | "QC"
+  | "SK"
+  | "YT";
 
-export type ImpactDirection = "increase" | "decrease";
+export type LenderFormulaKey =
+  | "vacancy_rate"
+  | "economic_rent"
+  | "maintenance"
+  | "vacancy_amount"
+  | "surplus_shortfall"
+  | "dcr";
+
+export type RentalVariableKey = string;
+
+export type FormulaPlaceholderKey =
+  | RentalVariableKey
+  | LenderFormulaKey
+  | "provincial_vacancy_rate"
+  | "dwelling_type_percentage";
 
 export type RentalVariable = {
-  key: string;
+  key: RentalVariableKey;
   label: string;
   description: string;
   inputKind: InputKind;
-  defaultReferenceKey: string | null;
+  dependsOnKey: string | null;
+  dependsOnValue: number | null;
   displayOrder: number;
 };
 
-export type LenderRule = {
-  variableKey: string;
-  impactDirection: ImpactDirection;
-  calculationMode: CalculationMode;
-  factor: number;
-  referenceVariableKey: string | null;
-  notes: string;
+export type DwellingType = {
+  key: string;
+  label: string;
+  displayOrder: number;
 };
+
+export type LenderFormulas = Record<LenderFormulaKey, string>;
+
+export type ProvinceVacancyRates = Partial<Record<ProvinceCode, number>>;
 
 export type Lender = {
   id?: string;
   name: string;
-  baseAdjustment: number;
   notes: string;
-  rules: LenderRule[];
+  variableKeys: RentalVariableKey[];
+  activeFormulaKeys: LenderFormulaKey[];
+  provinceVacancyRates: ProvinceVacancyRates;
+  dwellingTypePercentages: Record<string, number>;
+  formulas: LenderFormulas;
 };
 
 export type ClientProperty = {
@@ -40,19 +68,31 @@ export type ClientProperty = {
   variableValues: Record<string, number>;
 };
 
+export type HousingUnitType = string;
+
+export type ClientProfile = {
+  addressLine1: string;
+  city: string;
+  province: ProvinceCode;
+  postalCode: string;
+  housingUnitType: HousingUnitType;
+};
+
 export type ClientScenario = {
   id: string;
   lenderId: string | null;
   lenderName: string | null;
   clientName: string;
-  baseLoanAmount: number;
+  clientProfile: ClientProfile;
   properties: ClientProperty[];
-  calculatedLoanAmount: number;
+  summaryValue: number;
+  dcr: number;
   updatedAt: string;
 };
 
 export type BootstrapPayload = {
   variables: RentalVariable[];
+  dwellingTypes: DwellingType[];
   lenders: Lender[];
   scenarios: ClientScenario[];
 };
