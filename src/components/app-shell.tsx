@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { Toaster } from "sonner";
 
 type AppShellProps = {
   title: string;
@@ -11,8 +12,8 @@ type AppShellProps = {
 };
 
 const navItems = [
-  { href: "/calculator", label: "Client Calculator" },
-  { href: "/lenders", label: "Lender Criteria" },
+  { href: "/calculator", label: "Client Intake" },
+  { href: "/lenders", label: "Template Library" },
 ];
 
 export function AppShell({
@@ -25,6 +26,7 @@ export function AppShell({
 
   return (
     <main className="app-shell">
+      <Toaster richColors position="top-right" />
       <div className="mx-auto flex max-w-7xl flex-col gap-6">
         <section className="glass-panel grid-board relative overflow-hidden rounded-[32px] p-6 sm:p-8">
           <div className="relative z-10 flex flex-col gap-8 lg:flex-row lg:items-start lg:justify-between">
@@ -68,7 +70,7 @@ export function AppShell({
                   Workspace Mode
                 </p>
                 <p className="mt-2 max-w-xs text-[var(--foreground)]">
-                  Anonymous broker mode. Shared criteria and scenarios, no login required.
+                  Broker workspace mode. Shared lender templates and saved intake files, no login required.
                 </p>
               </div>
             </div>
