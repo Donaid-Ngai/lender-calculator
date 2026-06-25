@@ -15,11 +15,12 @@ import {
   getAllTemplateInputLabels,
   getDropdownOptionsForRange,
   normalizeWorkbookInputKind,
-  readSavedTemplates,
+  readPersistedWorkbookWorkspace,
   shiftCellRange,
   toKey,
-  writeSavedTemplates,
+  writePersistedWorkbookWorkspace,
   type WorkbookDropdownRule,
+  type WorkbookWorkspaceData,
 } from "@/lib/workbook-template-client";
 import type {
   SavedWorkbookTemplate,
@@ -107,15 +108,29 @@ export function LendersWorkspace(props: LendersWorkspaceProps) {
   const [inputs, setInputs] = useState<WorkbookInputMapping[]>(createDefaultInputs);
   const [outputs, setOutputs] = useState<WorkbookOutputMapping[]>(createDefaultOutputs);
   const [savedTemplates, setSavedTemplates] = useState<SavedWorkbookTemplate[]>([]);
+  const [workspace, setWorkspace] = useState<WorkbookWorkspaceData>({
+    templates: [],
+    clients: [],
+    runResults: [],
+  });
   const [message, setMessage] = useState<string | null>(null);
   const [isDraggingWorkbook, setIsDraggingWorkbook] = useState(false);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      setSavedTemplates(readSavedTemplates());
-    }, 0);
+    let isMounted = true;
 
-    return () => window.clearTimeout(timer);
+    readPersistedWorkbookWorkspace().then((savedWorkspace) => {
+      if (!isMounted) {
+        return;
+      }
+
+      setWorkspace(savedWorkspace);
+      setSavedTemplates(savedWorkspace.templates);
+    });
+
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   const mappedInputCount = inputs.filter((input) => input.cell.trim()).length;
@@ -332,9 +347,17 @@ export function LendersWorkspace(props: LendersWorkspaceProps) {
         nextTemplate,
         ...savedTemplates.filter((template) => template.id !== nextTemplate.id),
       ];
+      const nextWorkspace = {
+        ...workspace,
+        templates: nextTemplates,
+        runResults: workspace.runResults.filter(
+          (result) => result.templateId !== nextTemplate.id
+        ),
+      };
 
-      writeSavedTemplates(nextTemplates);
+      await writePersistedWorkbookWorkspace(nextWorkspace);
       deleteSavedRunResultsForTemplate(nextTemplate.id);
+      setWorkspace(nextWorkspace);
       setSavedTemplates(nextTemplates);
       setEditingTemplateId(nextTemplate.id);
       setSavedWorkbookFileName(nextTemplate.fileName);
@@ -380,10 +403,19 @@ export function LendersWorkspace(props: LendersWorkspaceProps) {
     setMessage(`Loaded ${template.name}. Upload a workbook only if you want to replace the file.`);
   };
 
-  const deleteTemplate = (templateId: string) => {
+  const deleteTemplate = async (templateId: string) => {
     const nextTemplates = savedTemplates.filter((template) => template.id !== templateId);
-    writeSavedTemplates(nextTemplates);
+    const nextWorkspace = {
+      ...workspace,
+      templates: nextTemplates,
+      runResults: workspace.runResults.filter(
+        (result) => result.templateId !== templateId
+      ),
+    };
+
+    await writePersistedWorkbookWorkspace(nextWorkspace);
     deleteSavedRunResultsForTemplate(templateId);
+    setWorkspace(nextWorkspace);
     setSavedTemplates(nextTemplates);
   };
 

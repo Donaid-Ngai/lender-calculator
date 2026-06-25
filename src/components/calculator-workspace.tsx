@@ -7,18 +7,15 @@ import type { BootstrapPayload } from "@/lib/types";
 import {
   base64ToFile,
   createId,
-  deleteSavedRunResultsForClient,
   downloadBase64Workbook,
   getInputType,
   getTemplateInputCatalog,
   normalizeClientValue,
   normalizeClientValueList,
-  readSavedClients,
-  readSavedRunResults,
-  readSavedTemplates,
+  readPersistedWorkbookWorkspace,
   runWorkbookTemplate,
-  upsertSavedRunResults,
-  writeSavedClients,
+  writePersistedWorkbookWorkspace,
+  type WorkbookWorkspaceData,
 } from "@/lib/workbook-template-client";
 import type {
   SavedWorkbookTemplate,
@@ -94,7 +91,8 @@ function resizeValues(values: string[], nextLength: number) {
 
 function getSavedResultsForClient(
   clientId: string,
-  templateIds: string[]
+  templateIds: string[],
+  runResults: SavedWorkbookRunResult[]
 ): WorkbookDashboardRunResult[] {
   if (!clientId) {
     return [];
@@ -102,7 +100,7 @@ function getSavedResultsForClient(
 
   const selectedTemplateIds = new Set(templateIds);
 
-  return readSavedRunResults()
+  return runResults
     .filter(
       (result) =>
         result.clientId === clientId && selectedTemplateIds.has(result.templateId)
@@ -117,6 +115,11 @@ function getSavedResultsForClient(
 
 export function CalculatorWorkspace({ initialData }: CalculatorWorkspaceProps) {
   const [templates, setTemplates] = useState<SavedWorkbookTemplate[]>([]);
+  const [workspace, setWorkspace] = useState<WorkbookWorkspaceData>({
+    templates: [],
+    clients: [],
+    runResults: [],
+  });
   const [selectedTemplateIds, setSelectedTemplateIds] = useState<string[]>([]);
   const [clients, setClients] = useState<WorkbookClientFile[]>([]);
   const [activeClientId, setActiveClientId] = useState("");
@@ -126,22 +129,33 @@ export function CalculatorWorkspace({ initialData }: CalculatorWorkspaceProps) {
   const [dashboardResults, setDashboardResults] = useState<WorkbookDashboardRunResult[]>([]);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      const savedTemplates = readSavedTemplates();
-      const savedClients = readSavedClients();
-      const inputCatalog = getTemplateInputCatalog(savedTemplates);
-      const initialClients =
-        savedClients.length > 0
-          ? savedClients.map((client) => normalizeClient(client, inputCatalog))
-          : [createClient(1, inputCatalog)];
+    let isMounted = true;
 
-      setTemplates(savedTemplates);
-      setSelectedTemplateIds(savedTemplates.map((template) => template.id));
+    readPersistedWorkbookWorkspace().then((savedWorkspace) => {
+      if (!isMounted) {
+        return;
+      }
+
+      const inputCatalog = getTemplateInputCatalog(savedWorkspace.templates);
+      const initialClients =
+        savedWorkspace.clients.length > 0
+          ? savedWorkspace.clients.map((client) => normalizeClient(client, inputCatalog))
+          : [createClient(1, inputCatalog)];
+      const nextWorkspace = {
+        ...savedWorkspace,
+        clients: initialClients,
+      };
+
+      setWorkspace(nextWorkspace);
+      setTemplates(savedWorkspace.templates);
+      setSelectedTemplateIds(savedWorkspace.templates.map((template) => template.id));
       setClients(initialClients);
       setActiveClientId(initialClients[0]?.id ?? "");
-    }, 0);
+    });
 
-    return () => window.clearTimeout(timer);
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   const selectedTemplates = useMemo(
@@ -167,16 +181,28 @@ export function CalculatorWorkspace({ initialData }: CalculatorWorkspaceProps) {
   useEffect(() => {
     const timer = window.setTimeout(() => {
       setDashboardResults(
-        getSavedResultsForClient(activeClientId, selectedTemplateIds)
+        getSavedResultsForClient(
+          activeClientId,
+          selectedTemplateIds,
+          workspace.runResults
+        )
       );
     }, 0);
 
     return () => window.clearTimeout(timer);
-  }, [activeClientId, selectedTemplateIds]);
+  }, [activeClientId, selectedTemplateIds, workspace.runResults]);
 
-  const persistClients = (nextClients: WorkbookClientFile[]) => {
+  const persistWorkspace = async (nextWorkspace: WorkbookWorkspaceData) => {
+    setWorkspace(nextWorkspace);
+    await writePersistedWorkbookWorkspace(nextWorkspace);
+  };
+
+  const persistClients = async (nextClients: WorkbookClientFile[]) => {
     setClients(nextClients);
-    writeSavedClients(nextClients);
+    await persistWorkspace({
+      ...workspace,
+      clients: nextClients,
+    });
   };
 
   const updateClient = (clientId: string, nextValue: Partial<WorkbookClientFile>) => {
@@ -185,8 +211,21 @@ export function CalculatorWorkspace({ initialData }: CalculatorWorkspaceProps) {
         ? { ...client, ...nextValue, updatedAt: new Date().toISOString() }
         : client
     );
-    deleteSavedRunResultsForClient(clientId);
-    persistClients(nextClients);
+    const nextRunResults = workspace.runResults.filter(
+      (result) => result.clientId !== clientId
+    );
+
+    setWorkspace((current) => ({
+      ...current,
+      clients: nextClients,
+      runResults: nextRunResults,
+    }));
+    void writePersistedWorkbookWorkspace({
+      ...workspace,
+      clients: nextClients,
+      runResults: nextRunResults,
+    });
+    setClients(nextClients);
     setDashboardResults([]);
   };
 
@@ -203,8 +242,21 @@ export function CalculatorWorkspace({ initialData }: CalculatorWorkspaceProps) {
           }
         : client
     );
-    deleteSavedRunResultsForClient(clientId);
-    persistClients(nextClients);
+    const nextRunResults = workspace.runResults.filter(
+      (result) => result.clientId !== clientId
+    );
+
+    setWorkspace((current) => ({
+      ...current,
+      clients: nextClients,
+      runResults: nextRunResults,
+    }));
+    void writePersistedWorkbookWorkspace({
+      ...workspace,
+      clients: nextClients,
+      runResults: nextRunResults,
+    });
+    setClients(nextClients);
     setDashboardResults([]);
   };
 
@@ -249,7 +301,7 @@ export function CalculatorWorkspace({ initialData }: CalculatorWorkspaceProps) {
       };
     });
 
-    persistClients(nextClients);
+    void persistClients(nextClients);
     setOpenUnitKeys((current) => {
       const nextOpenUnits: Record<string, boolean> = {};
 
@@ -269,7 +321,7 @@ export function CalculatorWorkspace({ initialData }: CalculatorWorkspaceProps) {
   const addClient = () => {
     const nextClient = createClient(clients.length + 1, inputCatalog);
     const nextClients = [...clients, nextClient];
-    persistClients(nextClients);
+    void persistClients(nextClients);
     setActiveClientId(nextClient.id);
   };
 
@@ -279,8 +331,21 @@ export function CalculatorWorkspace({ initialData }: CalculatorWorkspaceProps) {
     }
 
     const nextClients = clients.filter((client) => client.id !== clientId);
-    deleteSavedRunResultsForClient(clientId);
-    persistClients(nextClients);
+    const nextRunResults = workspace.runResults.filter(
+      (result) => result.clientId !== clientId
+    );
+
+    setWorkspace((current) => ({
+      ...current,
+      clients: nextClients,
+      runResults: nextRunResults,
+    }));
+    void writePersistedWorkbookWorkspace({
+      ...workspace,
+      clients: nextClients,
+      runResults: nextRunResults,
+    });
+    setClients(nextClients);
     setActiveClientId(nextClients[0]?.id ?? "");
   };
 
@@ -339,12 +404,38 @@ export function CalculatorWorkspace({ initialData }: CalculatorWorkspaceProps) {
       }
 
       if (savedResults.length) {
-        upsertSavedRunResults(savedResults);
+        const byResultKey = new Map<string, SavedWorkbookRunResult>();
+
+        for (const result of [...workspace.runResults, ...savedResults]) {
+          byResultKey.set(`${result.clientId}:${result.templateId}`, result);
+        }
+
+        const nextRunResults = Array.from(byResultKey.values()).sort((left, right) =>
+          right.updatedAt.localeCompare(left.updatedAt)
+        );
+        const nextWorkspace = {
+          ...workspace,
+          clients,
+          runResults: nextRunResults,
+        };
+
+        setWorkspace(nextWorkspace);
+        await writePersistedWorkbookWorkspace(nextWorkspace);
       }
 
       const nextResults = getSavedResultsForClient(
         activeClient.id,
-        selectedTemplateIds
+        selectedTemplateIds,
+        savedResults.length
+          ? Array.from(
+              new Map(
+                [...workspace.runResults, ...savedResults].map((result) => [
+                  `${result.clientId}:${result.templateId}`,
+                  result,
+                ])
+              ).values()
+            )
+          : workspace.runResults
       );
       setDashboardResults(nextResults);
       setMessage(

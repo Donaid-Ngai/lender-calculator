@@ -37,6 +37,12 @@ export const savedClientsKey = "rental-lender-calculator.workbook-clients.v1";
 export const savedRunResultsKey =
   "rental-lender-calculator.workbook-run-results.v1";
 
+export type WorkbookWorkspaceData = {
+  templates: SavedWorkbookTemplate[];
+  clients: WorkbookClientFile[];
+  runResults: SavedWorkbookRunResult[];
+};
+
 export function createId(prefix: string) {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
@@ -553,6 +559,79 @@ export function readSavedRunResults() {
 
 export function writeSavedRunResults(results: SavedWorkbookRunResult[]) {
   writeJsonArray(savedRunResultsKey, results);
+}
+
+export function readLocalWorkbookWorkspace(): WorkbookWorkspaceData {
+  return {
+    templates: readSavedTemplates(),
+    clients: readSavedClients(),
+    runResults: readSavedRunResults(),
+  };
+}
+
+export function writeLocalWorkbookWorkspace(workspace: WorkbookWorkspaceData) {
+  writeSavedTemplates(workspace.templates);
+  writeSavedClients(workspace.clients);
+  writeSavedRunResults(workspace.runResults);
+}
+
+function isWorkspaceEmpty(workspace: WorkbookWorkspaceData) {
+  return (
+    workspace.templates.length === 0 &&
+    workspace.clients.length === 0 &&
+    workspace.runResults.length === 0
+  );
+}
+
+async function requestWorkbookWorkspace(
+  method: "GET" | "PUT",
+  workspace?: WorkbookWorkspaceData
+) {
+  const response = await fetch("/api/workbook/workspace", {
+    method,
+    headers: workspace ? { "Content-Type": "application/json" } : undefined,
+    body: workspace ? JSON.stringify(workspace) : undefined,
+  });
+  const data = (await response.json()) as WorkbookWorkspaceData | { error?: string };
+
+  if (!response.ok) {
+    throw new Error("error" in data ? data.error : "Workbook workspace request failed.");
+  }
+
+  return data as WorkbookWorkspaceData;
+}
+
+export async function readPersistedWorkbookWorkspace() {
+  const localWorkspace = readLocalWorkbookWorkspace();
+
+  try {
+    const remoteWorkspace = await requestWorkbookWorkspace("GET");
+
+    if (isWorkspaceEmpty(remoteWorkspace) && !isWorkspaceEmpty(localWorkspace)) {
+      const savedWorkspace = await requestWorkbookWorkspace("PUT", localWorkspace);
+      writeLocalWorkbookWorkspace(savedWorkspace);
+      return savedWorkspace;
+    }
+
+    writeLocalWorkbookWorkspace(remoteWorkspace);
+    return remoteWorkspace;
+  } catch (error) {
+    console.warn("Using local workbook workspace fallback.", error);
+    return localWorkspace;
+  }
+}
+
+export async function writePersistedWorkbookWorkspace(workspace: WorkbookWorkspaceData) {
+  writeLocalWorkbookWorkspace(workspace);
+
+  try {
+    const savedWorkspace = await requestWorkbookWorkspace("PUT", workspace);
+    writeLocalWorkbookWorkspace(savedWorkspace);
+    return savedWorkspace;
+  } catch (error) {
+    console.warn("Workbook workspace saved locally only.", error);
+    return workspace;
+  }
 }
 
 export function upsertSavedRunResults(results: SavedWorkbookRunResult[]) {
