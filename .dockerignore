@@ -1,0 +1,14 @@
+.agents
+.codex
+.env*
+.git
+.gitignore
+.next
+coverage
+node_modules
+npm-debug.log*
+pnpm-debug.log*
+supabase
+xlsx/downloaded
+yarn-debug.log*
+yarn-error.log*
