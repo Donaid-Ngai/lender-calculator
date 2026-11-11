@@ -2,7 +2,7 @@
 substitutions:
   _IMAGE: europe-north1-docker.pkg.dev/personal-493517/apps/lender-calculator
   _COOLIFY_URL: https://coolify.teamofones.com
-  _COOLIFY_APP: mtzp348o55oapkffb6o8u890
+  _COOLIFY_APP: ekcs9ogzbmlam41o7bsamaso
 
 steps:
   - id: build
